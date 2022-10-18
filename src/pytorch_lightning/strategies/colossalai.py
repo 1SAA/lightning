@@ -250,9 +250,7 @@ class ColossalAIStrategy(DDPStrategy):
         else:
             self.model = pl_module._colossalai_zero[0]  # type: ignore[index, assignment]
         if is_training:
-            self.optimizers = [
-                ZeroOptimizer(optimizer, self.model, gpu_margin_mem_ratio=self.gpu_margin_mem_ratio, **self.amp_kwargs)
-            ]
+            self.optimizers = [ZeroOptimizer(optimizer, self.model, **self.amp_kwargs)]
 
     def setup(self, trainer: "pl.Trainer") -> None:
         precision = self.precision_plugin.precision
