@@ -100,7 +100,7 @@ def test_gradient_clip_algorithm_error(tmpdir):
         trainer.fit(model)
 
 
-@RunIf(min_cuda_gpus=1, standalone=True, colossalai=True)
+@RunIf(min_cuda_gpus=1, standalone=False, colossalai=True)
 def test_gradient_accumulation_error(tmpdir):
     model = ModelParallelBoringModel()
     trainer = Trainer(
