@@ -62,17 +62,6 @@ class ColossalAIStrategy(DDPStrategy):
         trainer = Trainer(..., accelerator="gpu", precision=16, strategy="colossalai")
 
     Args:
-        use_chunk: Whether to use chunk-based memory management.
-            It can speed up training, but slightly more memory will be used.
-
-        chunk_size: The size of a chunk.
-            It will be ignored when ``use_chunk=False``.
-            If it's None, a best chunk size will be searched out based on ``chunk_search_range``,
-            ``chunk_search_n_grids`` and ``min_chunk_size``.
-
-        enable_distributed_storage: Whether to storage model in a distributed manner.
-            It reduces memory from 1 to 1/N, but it may slow down training.
-
         placement_policy: It can be "cpu", "cuda" and "auto".
 
             * If it's "cpu", parameters, gradients and optimizer states will be offloaded to CPU,
@@ -84,17 +73,11 @@ class ColossalAIStrategy(DDPStrategy):
 
         force_outputs_fp32: Whether to cast outputs to fp32.
 
-        gpu_margin_mem_ratio: The ratio of GPU remaining memory (after the first forward-backward)
-            which will be used by optimizer.
-            This argument will be ignored when ``placement_policy`` is not "auto".
-
-        chunk_search_range: The range of chunk size to search.
+        chunk_search_range_mb: The range of chunk size to search in MiB.
             The actual search range will be from
             ``max(min_chunk_size, max_param_size)`` to ``max(min_chunk_size, max_param_size) + chunk_search_range``.
 
-        chunk_search_n_grids: The number of intervals in the search range.
-
-        min_chunk_size: The minimum size for a chunk.
+        min_chunk_size_mb: The minimum size for a chunk in MiB.
 
         initial_scale: The initial dynamic loss scale value.
 
@@ -122,15 +105,12 @@ class ColossalAIStrategy(DDPStrategy):
 
     def __init__(
         self,
-        use_chunk: bool = True,
-        chunk_size: Optional[int] = None,
-        enable_distributed_storage: bool = True,
         placement_policy: str = "auto",
         force_outputs_fp32: bool = False,
-        gpu_margin_mem_ratio: float = 0.0,
-        chunk_search_range: int = 64 * 1024**2,
-        chunk_search_n_grids: int = 1024,
-        min_chunk_size: Optional[int] = None,
+        hidden_dim: int = 1024,
+        chunk_search_range_mb: int = 64,
+        min_chunk_size_mb: int = 32,
+        pin_memory: bool = True,
         initial_scale: float = 2**16,
         min_scale: float = 1,
         growth_factor: float = 2,
@@ -160,16 +140,13 @@ class ColossalAIStrategy(DDPStrategy):
             precision_plugin=precision_plugin,
         )
 
-        self.use_chunk = use_chunk
-        self.chunk_size = chunk_size
-        self.enable_distributed_storage = enable_distributed_storage
         self.placement_policy = placement_policy
         self.force_outputs_fp32 = force_outputs_fp32
-        self.gpu_margin_mem_ratio = gpu_margin_mem_ratio
-        self.chunk_size_search_kwargs = {
-            "search_range": chunk_search_range,
-            "n_grids": chunk_search_n_grids,
-            "min_chunk_size": min_chunk_size,
+        self.pin_memory = pin_memory
+        self.chunk_init_kwargs = {
+            "hidden_dim": max(1024, hidden_dim),
+            "search_range_mb": chunk_search_range_mb,
+            "min_chunk_size_mb": min_chunk_size_mb,
         }
         self.amp_kwargs = {
             "initial_scale": initial_scale,
@@ -242,10 +219,10 @@ class ColossalAIStrategy(DDPStrategy):
 
     def setup_precision_plugin(self) -> None:
         with _patch_cuda_is_available():
-            from colossalai.gemini import ChunkManager, GeminiManager
+            from colossalai.gemini import GeminiManager
+            from colossalai.gemini.chunk import init_chunk_manager
             from colossalai.nn.optimizer import CPUAdam, HybridAdam
             from colossalai.nn.parallel import ZeroDDP
-            from colossalai.tensor import ProcessGroup
             from colossalai.zero import ZeroOptimizer
 
         super().setup_precision_plugin()
@@ -263,20 +240,8 @@ class ColossalAIStrategy(DDPStrategy):
                 )
         assert isinstance(self.model, (pl.LightningModule, _LightningPrecisionModuleWrapperBase))
         pl_module = self.model
-        process_group = ProcessGroup()
         if not hasattr(pl_module, "_colossalai_zero"):
-            if self.use_chunk:
-                chunk_size = self.chunk_size or ChunkManager.search_chunk_size(
-                    self.model, **self.chunk_size_search_kwargs
-                )
-            else:
-                chunk_size = None
-            chunk_manager = ChunkManager(
-                chunk_size,
-                process_group,
-                self.enable_distributed_storage,
-                GeminiManager.get_default_device(self.placement_policy),
-            )
+            chunk_manager = init_chunk_manager(self.model, **self.chunk_init_kwargs)
             gemini_manager = GeminiManager(self.placement_policy, chunk_manager)
             model = _LightningModuleWrapperBase(self.model)
             self.model = ZeroDDP(model, gemini_manager, self.force_outputs_fp32)
